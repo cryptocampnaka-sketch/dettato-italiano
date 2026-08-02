@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Dettato Italiano · Ditado de Italiano</title>
+<script src="https://aka.ms/csspeech/jsbrowserpackageraw"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;0,6..72,700;0,6..72,800;1,6..72,500;1,6..72,600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Lora:ital,wght@0,400;0,500;1,400;1,500&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
 <style>
@@ -5795,14 +5796,15 @@ function switchModeView(){
 
 function updateModeNote(){
   const note = document.getElementById('modeNote');
+  const micOk = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
   if (state.mode === 'speech'){
-    note.textContent = getSpeechRecognitionCtor()
-      ? 'Toque no microfone e repita a frase em italiano. A avaliação agora é rigorosa: exige texto quase idêntico ao nativo. Funciona melhor no Chrome/Edge (computador ou Android), com o microfone liberado. Atenção: o reconhecimento de voz do navegador corrige automaticamente para a palavra italiana correta mesmo com sotaque — ele avalia principalmente se a palavra foi entendida, não a qualidade fonética exata; use-o como apoio, não como veredito definitivo.'
-      : 'Seu navegador não suporta reconhecimento de voz. Tente abrir esta página no Chrome ou Edge.';
+    note.textContent = micOk
+      ? 'Toque no microfone e repita a frase em italiano. A avaliação é feita por reconhecimento de fonemas (Azure AI Speech), com notas de precisão, fluência e completude — não é só um comparador de texto.'
+      : 'Seu navegador não suporta gravação de áudio. Tente abrir esta página no Chrome, Edge, Firefox ou Safari.';
   } else if (state.mode === 'interview'){
-    note.textContent = getSpeechRecognitionCtor()
+    note.textContent = micOk
       ? 'Preencha seus dados, salve e inicie a simulação da 1ª parte da prova orale.'
-      : 'Seu navegador não suporta reconhecimento de voz. Tente abrir esta página no Chrome ou Edge.';
+      : 'Seu navegador não suporta gravação de áudio. Tente abrir esta página no Chrome, Edge, Firefox ou Safari.';
   } else {
     note.textContent = '';
   }
@@ -5911,7 +5913,7 @@ function renderPhoneticsQuestion(){
       <div style="height:24px;"></div>
 
       <button class="record-btn" id="recordBtn" title="Gravar minha voz">🎙️</button>
-      <div class="mic-hint" id="recordHint">Toque para gravar sua pronúncia — a gravação para sozinha quando você terminar de falar</div>
+      <div class="mic-hint" id="recordHint">Toque para gravar sua pronúncia</div>
 
       <div id="labHeardBox" class="feedback"></div>
       <div id="labPlaybackBox" class="lab-playback"></div>
@@ -5939,13 +5941,10 @@ function nextPhoneticsWord(){
   renderPhoneticsQuestion();
 }
 
-function togglePhoneticsRecording(item){
-  if (state.phon.recording){
-    stopPhoneticsRecording(false, 'manual');
-    return;
-  }
-  if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder)){
-    alert("Seu navegador não suporta gravação de áudio. Tente usar o Chrome ou Edge.");
+async function togglePhoneticsRecording(item){
+  if (state.phon.recording) return; // a avaliação termina sozinha; evita cliques duplicados
+  if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)){
+    alert("Seu navegador não suporta gravação de áudio. Tente usar o Chrome, Edge, Firefox ou Safari.");
     return;
   }
   const btn = document.getElementById('recordBtn');
@@ -5955,102 +5954,87 @@ function togglePhoneticsRecording(item){
   if (heardBox){ heardBox.innerHTML = ''; heardBox.classList.remove('good','bad'); }
   if (playbackBox) playbackBox.innerHTML = '';
 
-  navigator.mediaDevices.getUserMedia({ audio: true }).then(stream=>{
-    state.phon.stream = stream;
-    const mr = new MediaRecorder(stream);
-    state.phon.mediaRecorder = mr;
-    state.phon.chunks = [];
-    state.phon.recording = true;
-    btn.classList.add('recording');
-    hint.textContent = 'Ouvindo... fale a palavra (a gravação para sozinha)';
+  // identifica esta chamada, para descartar o resultado se o usuário já tiver
+  // trocado de palavra antes da Azure responder
+  const myReqId = (state.phon.reqId = (state.phon.reqId||0) + 1);
 
-    mr.ondataavailable = e => { if (e.data.size > 0) state.phon.chunks.push(e.data); };
-    mr.onstop = ()=>{
-      if (state.phon.stream){
-        state.phon.stream.getTracks().forEach(t => t.stop());
-        state.phon.stream = null;
-      }
-      const blob = new Blob(state.phon.chunks, { type:'audio/webm' });
-      if (state.phon.audioURL) URL.revokeObjectURL(state.phon.audioURL);
-      state.phon.audioURL = URL.createObjectURL(blob);
-      renderPhoneticsListenButton();
-    };
+  state.phon.recording = true;
+  btn.classList.add('recording');
+  hint.textContent = 'Ouvindo... fale a palavra';
 
-    mr.start();
-
-    // trava de segurança: encerra sozinho mesmo se nada detectar o fim da fala
-    state.phon.maxTimer = setTimeout(()=> stopPhoneticsRecording(false, 'timeout'), 6000);
-
-    // tenta usar reconhecimento de fala: além de dar feedback do que foi entendido,
-    // ele detecta sozinho quando a pessoa parou de falar e encerra a gravação
-    const SR = getSpeechRecognitionCtor();
-    if (SR){
-      try{
-        const rec = new SR();
-        rec.lang = 'it-IT';
-        rec.interimResults = false;
-        rec.maxAlternatives = 1;
-        rec.onresult = (e)=>{
-          const result = e.results[0][0];
-          const transcript = result.transcript;
-          const confidence = (typeof result.confidence === 'number' && result.confidence > 0) ? result.confidence : null;
-          const heard = canonicalizeNumbers(transcript);
-          const target = canonicalizeNumbers(item.it);
-          const sim = similarity(heard, target);
-          // Avaliação rigorosa: exige texto quase idêntico ao nativo e, quando disponível,
-          // alta confiança do próprio reconhecedor — o motor tende a "corrigir" sozinho
-          // para a palavra italiana correta mesmo com sotaque, então o texto sozinho
-          // nem sempre denuncia um erro de pronúncia.
-          const simOk = sim >= 0.98;
-          const confOk = confidence === null ? true : confidence >= 0.8;
-          const ok = simOk && confOk;
-          const pct = Math.round(sim*100);
-          const confLine = (confidence !== null) ? `<br>Confiança do reconhecimento: <b>${Math.round(confidence*100)}%</b>` : '';
-          const hb = document.getElementById('labHeardBox');
-          if (hb){
-            hb.classList.remove('good','bad');
-            if (ok){
-              hb.classList.add('good');
-              hb.innerHTML = `
-                <div class="fb-title">✓ Pronuncia eccellente!</div>
-                <div class="fb-answers">
-                  Texto esperado: <b>${item.it}</b><br>
-                  Você falou: <b>${transcript}</b><br>
-                  Tradução: ${item.pt}<br>
-                  Precisão: <b>${pct}%</b> — muito próxima da pronúncia nativa.${confLine}
-                </div>
-              `;
-            } else {
-              hb.classList.add('bad');
-              hb.innerHTML = `
-                <div class="fb-title">✗ A pronúncia não bateu</div>
-                <div class="fb-answers">
-                  Texto esperado: <b>${item.it}</b><br>
-                  Você falou: <b>${transcript || '(nada reconhecido)'}</b><br>
-                  Tradução: ${item.pt}<br>
-                  Precisão: <b>${pct}%</b> — abaixo do exigido para uma pronúncia nativa.${confLine}
-                </div>
-              `;
-            }
-          }
-        };
-        rec.onerror = ()=>{};
-        rec.onend = ()=>{
-          // fim da fala detectado automaticamente -> encerra a gravação também
-          stopPhoneticsRecording(false, 'auto');
-        };
-        rec.start();
-        state.phon._rec = rec;
-      }catch(err){
-        // sem reconhecimento disponível: usa detecção de silêncio como alternativa
-        startPhoneticsSilenceWatcher(stream);
-      }
-    } else {
-      startPhoneticsSilenceWatcher(stream);
+  // grava o áudio também (melhor esforço), só para permitir reescutar a sua voz depois
+  let localStream = null;
+  if (window.MediaRecorder){
+    try{
+      localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mr = new MediaRecorder(localStream);
+      state.phon.mediaRecorder = mr;
+      state.phon.chunks = [];
+      mr.ondataavailable = e => { if (e.data.size > 0) state.phon.chunks.push(e.data); };
+      mr.onstop = ()=>{
+        const blob = new Blob(state.phon.chunks, { type:'audio/webm' });
+        if (state.phon.audioURL) URL.revokeObjectURL(state.phon.audioURL);
+        state.phon.audioURL = URL.createObjectURL(blob);
+        if (state.phon.reqId === myReqId) renderPhoneticsListenButton();
+      };
+      mr.start();
+    } catch(err){
+      state.phon.mediaRecorder = null;
     }
-  }).catch(()=>{
-    hint.textContent = 'Não foi possível acessar o microfone.';
-  });
+  }
+
+  try{
+    const resultado = await avaliarPronunciaAzure(item.it);
+    if (localStream) localStream.getTracks().forEach(t => t.stop());
+    if (state.phon.mediaRecorder && state.phon.mediaRecorder.state !== 'inactive'){
+      state.phon.mediaRecorder.stop();
+    }
+    if (state.phon.reqId !== myReqId) return; // resultado desatualizado, usuário já mudou de palavra
+
+    const isCorrect = resultado.geral >= 80;
+    const hb = document.getElementById('labHeardBox');
+    if (hb){
+      hb.classList.remove('good','bad');
+      if (isCorrect){
+        hb.classList.add('good');
+        hb.innerHTML = `
+          <div class="fb-title">✓ Pronuncia eccellente!</div>
+          <div class="fb-answers">
+            Texto esperado: <b>${item.it}</b><br>
+            Você falou: <b>${resultado.transcript || '(nada reconhecido)'}</b><br>
+            Tradução: ${item.pt}<br>
+            Precisão: <b>${resultado.precisao}%</b> · Fluência: <b>${resultado.fluencia}%</b> · Completude: <b>${resultado.completude}%</b><br>
+            Nota geral: <b>${resultado.geral}%</b>
+          </div>
+        `;
+      } else {
+        hb.classList.add('bad');
+        hb.innerHTML = `
+          <div class="fb-title">✗ A pronúncia não bateu</div>
+          <div class="fb-answers">
+            Texto esperado: <b>${item.it}</b><br>
+            Você falou: <b>${resultado.transcript || '(nada reconhecido)'}</b><br>
+            Tradução: ${item.pt}<br>
+            Precisão: <b>${resultado.precisao}%</b> · Fluência: <b>${resultado.fluencia}%</b> · Completude: <b>${resultado.completude}%</b><br>
+            Nota geral: <b>${resultado.geral}%</b> — abaixo do exigido para uma pronúncia nativa.
+          </div>
+        `;
+      }
+    }
+  } catch(err){
+    if (localStream) localStream.getTracks().forEach(t => t.stop());
+    if (state.phon.reqId === myReqId){
+      hint.textContent = 'Não foi possível avaliar. Verifique o microfone e toque novamente.';
+    }
+  } finally {
+    if (state.phon.reqId === myReqId){
+      state.phon.recording = false;
+      btn.classList.remove('recording');
+      if (hint.textContent === 'Ouvindo... fale a palavra'){
+        hint.textContent = 'Toque para gravar sua pronúncia';
+      }
+    }
+  }
 }
 
 function startPhoneticsSilenceWatcher(stream){
@@ -6107,13 +6091,8 @@ function renderPhoneticsListenButton(){
 }
 
 function stopPhoneticsRecording(silent, reason){
-  if (state.phon.maxTimer){ clearTimeout(state.phon.maxTimer); state.phon.maxTimer = null; }
-  stopPhoneticsSilenceWatcher();
-  if (state.phon._rec){
-    const r = state.phon._rec;
-    state.phon._rec = null;
-    try{ r.onend = null; r.stop(); }catch(err){}
-  }
+  // invalida qualquer avaliação da Azure que ainda esteja em andamento para a palavra anterior
+  state.phon.reqId = (state.phon.reqId||0) + 1;
   if (state.phon.mediaRecorder && state.phon.recording){
     try{ state.phon.mediaRecorder.stop(); }catch(err){}
   }
@@ -6121,7 +6100,7 @@ function stopPhoneticsRecording(silent, reason){
   const btn = document.getElementById('recordBtn');
   const hint = document.getElementById('recordHint');
   if (btn) btn.classList.remove('recording');
-  if (hint && !silent) hint.textContent = 'Toque para gravar sua pronúncia — a gravação para sozinha quando você terminar de falar';
+  if (hint && !silent) hint.textContent = 'Toque para gravar sua pronúncia';
 }
 
 /* ================= UTIL ================= */
@@ -6301,72 +6280,85 @@ function renderQuestion(){
   itInput.focus();
 }
 
-function startRecording(item){
+// Chama o backend (Netlify Function) para obter um token temporário da Azure,
+// grava o microfone e devolve as notas de avaliação de pronúncia (0-100).
+async function avaliarPronunciaAzure(textoReferencia){
+  const tokenResp = await fetch('/api/get-speech-token');
+  if (!tokenResp.ok) throw new Error('Falha ao obter token de acesso.');
+  const { token, region } = await tokenResp.json();
+
+  const speechConfig = SpeechSDK.SpeechConfig.fromAuthorizationToken(token, region);
+  speechConfig.speechRecognitionLanguage = 'it-IT';
+
+  const audioConfig = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
+
+  const pronunciationConfig = new SpeechSDK.PronunciationAssessmentConfig(
+    textoReferencia,
+    SpeechSDK.PronunciationAssessmentGradingSystem.HundredMark,
+    SpeechSDK.PronunciationAssessmentGranularity.Phoneme,
+    true
+  );
+
+  const recognizer = new SpeechSDK.SpeechRecognizer(speechConfig, audioConfig);
+  pronunciationConfig.applyTo(recognizer);
+
+  return new Promise((resolve, reject) => {
+    recognizer.recognizeOnceAsync(
+      (result) => {
+        recognizer.close();
+        if (result.reason === SpeechSDK.ResultReason.RecognizedSpeech){
+          const pron = SpeechSDK.PronunciationAssessmentResult.fromResult(result);
+          resolve({
+            transcript: result.text,
+            precisao: Math.round(pron.accuracyScore),
+            fluencia: Math.round(pron.fluencyScore),
+            completude: Math.round(pron.completenessScore),
+            geral: Math.round(pron.pronunciationScore)
+          });
+        } else {
+          reject(new Error('Não entendi. Fale mais perto do microfone.'));
+        }
+      },
+      (err) => { recognizer.close(); reject(err); }
+    );
+  });
+}
+
+async function startRecording(item){
   if (state.answered) return;
-  const SR = getSpeechRecognitionCtor();
   const micBtn = document.getElementById('micBtn');
   const hint = document.getElementById('micHint');
-  if (!SR){
-    alert("Seu navegador não suporta reconhecimento de voz. Tente usar o Chrome ou Edge (computador ou Android).");
-    return;
-  }
-  const rec = new SR();
-  rec.lang = 'it-IT';
-  rec.interimResults = false;
-  rec.maxAlternatives = 1;
 
   micBtn.classList.add('recording');
   micBtn.disabled = true;
   hint.textContent = 'Ouvindo... fale agora';
 
-  rec.onresult = (e)=>{
-    const result = e.results[0][0];
-    const transcript = result.transcript;
-    const confidence = (typeof result.confidence === 'number' && result.confidence > 0) ? result.confidence : null;
-    evaluateSpeech(item, transcript, confidence);
-  };
-  rec.onerror = ()=>{
-    micBtn.classList.remove('recording');
-    micBtn.disabled = false;
-    hint.textContent = 'Não entendi. Verifique o microfone e toque novamente.';
-  };
-  rec.onend = ()=>{
+  try{
+    const resultado = await avaliarPronunciaAzure(item.it);
+    evaluateSpeech(item, resultado);
+  } catch(err){
+    hint.textContent = 'Não foi possível avaliar. Verifique o microfone e toque novamente.';
+  } finally {
     micBtn.classList.remove('recording');
     if (!state.answered) micBtn.disabled = false;
-  };
-
-  try{
-    rec.start();
-  } catch(err){
-    micBtn.classList.remove('recording');
-    micBtn.disabled = false;
-    hint.textContent = 'Não foi possível acessar o microfone.';
   }
 }
 
-function evaluateSpeech(item, transcript, confidence){
+function evaluateSpeech(item, resultado){
   if (state.answered) return;
-  const heard = normalize(transcript);
-  const target = normalize(item.it);
-  const sim = similarity(heard, target);
-  // Avaliação rigorosa: exige texto quase idêntico ao nativo e, quando o navegador
-  // informa a confiança do reconhecimento, exige também alta confiança —
-  // pois o motor de reconhecimento tende a "corrigir" sozinho para a palavra italiana
-  // correta mesmo quando a pronúncia foi feita com sotaque, então o texto reconhecido
-  // sozinho nem sempre denuncia um erro de pronúncia.
-  const conf = (typeof confidence === 'number' && confidence > 0) ? confidence : null;
-  const simOk = sim >= 0.98;
-  const confOk = conf === null ? true : conf >= 0.8;
-  const isCorrect = simOk && confOk;
+  // Nota geral mínima (0-100) para considerar a pronúncia correta.
+  // Ajuste esse número se quiser exigir mais ou menos rigor.
+  const NOTA_MINIMA = 80;
+  const isCorrect = resultado.geral >= NOTA_MINIMA;
 
   const box = document.getElementById('transcriptBox');
   box.style.display = 'block';
-  box.innerHTML = `Você disse: <b>${transcript}</b>`;
+  box.innerHTML = `Você disse: <b>${resultado.transcript || '(nada reconhecido)'}</b>`;
 
   const hint = document.getElementById('micHint');
   hint.textContent = 'Toque no microfone e repita a frase em italiano';
 
-  finishAnswer(item, isCorrect, {transcript, sim, conf});
+  finishAnswer(item, isCorrect, resultado);
 }
 
 function checkAnswer(item){
@@ -6417,15 +6409,14 @@ function finishAnswer(item, isCorrect, detail, wasRevealed){
     postcard.classList.add('state-good');
     fb.classList.add('good');
     if (isSpeech){
-      const pct = Math.round((detail.sim||0)*100);
-      const confLine = (typeof detail.conf === 'number') ? `<br>Confiança do reconhecimento: <b>${Math.round(detail.conf*100)}%</b>` : '';
       fb.innerHTML = `
         <div class="fb-title">✓ Pronuncia eccellente!</div>
         <div class="fb-answers">
           Texto esperado: <b>${item.it}</b><br>
           Você falou: <b>${detail.transcript || '(nada reconhecido)'}</b><br>
           Tradução: ${item.pt[0]}<br>
-          Precisão: <b>${pct}%</b> — muito próxima da pronúncia nativa.${confLine}
+          Precisão: <b>${detail.precisao}%</b> · Fluência: <b>${detail.fluencia}%</b> · Completude: <b>${detail.completude}%</b><br>
+          Nota geral: <b>${detail.geral}%</b> — muito próxima da pronúncia nativa.
         </div>
       `;
     } else {
@@ -6435,17 +6426,14 @@ function finishAnswer(item, isCorrect, detail, wasRevealed){
     postcard.classList.add('state-bad');
     fb.classList.add('bad');
     if (isSpeech && !wasRevealed){
-      const pct = Math.round((detail.sim||0)*100);
-      const diff = diffWords(item.it, detail.transcript || '');
-      const diffHtml = diff.map(w => `<span class="${w.ok ? 'diff-ok' : 'diff-bad'}">${w.word}</span>`).join(' ');
-      const confLine = (typeof detail.conf === 'number') ? `<br>Confiança do reconhecimento: <b>${Math.round(detail.conf*100)}%</b>` : '';
       fb.innerHTML = `
         <div class="fb-title">✗ A pronúncia não bateu</div>
         <div class="fb-answers">
-          Texto esperado: <b>${diffHtml}</b><br>
+          Texto esperado: <b>${item.it}</b><br>
           Você falou: <b>${detail.transcript || '(nada reconhecido)'}</b><br>
           Tradução: ${item.pt[0]}<br>
-          Precisão: <b>${pct}%</b> — em vermelho, as palavras que não bateram com a pronúncia nativa.${confLine}
+          Precisão: <b>${detail.precisao}%</b> · Fluência: <b>${detail.fluencia}%</b> · Completude: <b>${detail.completude}%</b><br>
+          Nota geral: <b>${detail.geral}%</b> — abaixo do exigido para uma pronúncia nativa.
         </div>
       `;
     } else {
@@ -6909,15 +6897,10 @@ function renderInterviewQuestion(){
   setTimeout(()=> speak(q.it, 0.88), 300);
 }
 
-function startInterviewRecording(q){
+async function startInterviewRecording(q){
   if (state.interview.answered) return;
-  const SR = getSpeechRecognitionCtor();
   const micBtn = document.getElementById('intMicBtn');
   const hint = document.getElementById('intMicHint');
-  if (!SR){
-    alert("Seu navegador não suporta reconhecimento de voz. Tente usar o Chrome ou Edge (computador ou Android).");
-    return;
-  }
 
   // limpa a gravação anterior, se houver
   if (state.interview.currentAudioURL){
@@ -6929,9 +6912,12 @@ function startInterviewRecording(q){
   micBtn.disabled = true;
   hint.textContent = 'Ouvindo... fale agora';
 
-  // tenta gravar o áudio também (melhor esforço), para permitir reescutar a resposta depois
+  // grava o áudio também (melhor esforço), só para permitir reescutar a resposta depois —
+  // não é usado para a avaliação em si, que é feita pela Azure separadamente
+  let localMediaRecorder = null;
   if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder){
-    navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+    try{
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const chunks = [];
       const mr = new MediaRecorder(stream);
       mr.ondataavailable = (e)=>{ if (e.data && e.data.size > 0) chunks.push(e.data); };
@@ -6942,45 +6928,29 @@ function startInterviewRecording(q){
         renderPlaybackButtonIfReady();
       };
       state.interview.mediaRecorder = mr;
+      localMediaRecorder = mr;
       mr.start();
-    }).catch(()=>{ state.interview.mediaRecorder = null; });
-  } else {
-    state.interview.mediaRecorder = null;
+    } catch(err){
+      state.interview.mediaRecorder = null;
+    }
   }
 
-  const rec = new SR();
-  rec.lang = 'it-IT';
-  rec.interimResults = false;
-  rec.maxAlternatives = 1;
-
-  rec.onresult = (e)=>{
-    const result = e.results[0][0];
-    const transcript = result.transcript;
-    const confidence = (typeof result.confidence === 'number' && result.confidence > 0) ? result.confidence : null;
-    if (state.interview.mediaRecorder && state.interview.mediaRecorder.state !== 'inactive'){
-      state.interview.mediaRecorder.stop();
-    }
-    evaluateInterviewSpeech(q, transcript, confidence);
-  };
-  rec.onerror = ()=>{
-    micBtn.classList.remove('recording');
-    micBtn.disabled = false;
-    hint.textContent = 'Não entendi. Verifique o microfone e toque novamente.';
-    if (state.interview.mediaRecorder && state.interview.mediaRecorder.state !== 'inactive'){
-      state.interview.mediaRecorder.stop();
-    }
-  };
-  rec.onend = ()=>{
-    micBtn.classList.remove('recording');
-    if (!state.interview.answered) micBtn.disabled = false;
-  };
-
   try{
-    rec.start();
+    const resultado = await avaliarPronunciaAzure(q.target);
+    if (localMediaRecorder && localMediaRecorder.state !== 'inactive'){
+      localMediaRecorder.stop();
+    }
+    evaluateInterviewSpeech(q, resultado);
   } catch(err){
     micBtn.classList.remove('recording');
     micBtn.disabled = false;
-    hint.textContent = 'Não foi possível acessar o microfone.';
+    hint.textContent = 'Não entendi. Verifique o microfone e toque novamente.';
+    if (localMediaRecorder && localMediaRecorder.state !== 'inactive'){
+      localMediaRecorder.stop();
+    }
+  } finally {
+    micBtn.classList.remove('recording');
+    if (!state.interview.answered) micBtn.disabled = false;
   }
 }
 
@@ -7008,23 +6978,18 @@ function diffWords(target, transcript){
   });
 }
 
-function evaluateInterviewSpeech(q, transcript, confidence){
+function evaluateInterviewSpeech(q, resultado){
   if (state.interview.answered) return;
 
-  const heard = canonicalizeNumbers(transcript);
-  const target = canonicalizeNumbers(q.target);
-  const sim = similarity(heard, target);
-  // Avaliação rigorosa: exige texto quase idêntico ao nativo e, quando disponível,
-  // alta confiança do reconhecedor.
-  const conf = (typeof confidence === 'number' && confidence > 0) ? confidence : null;
-  const simOk = sim >= 0.98;
-  const confOk = conf === null ? true : conf >= 0.8;
-  const isCorrect = simOk && confOk;
-  const confLine = (conf !== null) ? ` · Confiança: ${Math.round(conf*100)}%` : '';
+  // Nota geral mínima (0-100) para considerar a resposta correta.
+  const NOTA_MINIMA = 80;
+  const isCorrect = resultado.geral >= NOTA_MINIMA;
+  const transcript = resultado.transcript || '';
+  const scoreLine = `Precisão: ${resultado.precisao}% · Fluência: ${resultado.fluencia}% · Completude: ${resultado.completude}% · Nota geral: ${resultado.geral}%`;
 
   const box = document.getElementById('intTranscriptBox');
   box.style.display = 'block';
-  box.innerHTML = `Você disse: <b>${transcript}</b><div id="intPlaybackContainer"></div>`;
+  box.innerHTML = `Você disse: <b>${transcript || '(nada reconhecido)'}</b><div id="intPlaybackContainer"></div>`;
   renderPlaybackButtonIfReady();
 
   const fb = document.getElementById('intFeedback');
@@ -7040,7 +7005,7 @@ function evaluateInterviewSpeech(q, transcript, confidence){
     document.getElementById('intMicHint').textContent = 'Toque no microfone e responda em italiano';
 
     fb.classList.add('good');
-    fb.innerHTML = `<div class="fb-title">✓ Ottima pronuncia!</div><div class="fb-answers">${Math.round(sim*100)}% de semelhança.${confLine}</div>`;
+    fb.innerHTML = `<div class="fb-title">✓ Ottima pronuncia!</div><div class="fb-answers">${scoreLine}</div>`;
 
     state.interview.results.push({ question:q.it, target:q.target, correct:true, attempts:(state.interview.attempts||0)+1 });
     state.interview.attempts = 0;
@@ -7054,11 +7019,10 @@ function evaluateInterviewSpeech(q, transcript, confidence){
     state.interview.attempts = (state.interview.attempts||0) + 1;
     document.getElementById('intMicBtn').disabled = false;
 
-    const diff = diffWords(q.target, transcript);
     fb.classList.add('bad');
     fb.innerHTML = `
-      <div class="fb-title">✗ A pronúncia não bateu (${Math.round(sim*100)}%${confLine})</div>
-      <div class="fb-answers">Frase correta: ${diff.map(w => `<span class="${w.ok ? 'diff-ok' : 'diff-bad'}">${w.word}</span>`).join(' ')}</div>
+      <div class="fb-title">✗ A pronúncia não bateu</div>
+      <div class="fb-answers">${scoreLine}<br>Frase correta: ${q.target}</div>
     `;
 
     const retryBtn = document.createElement('button');
