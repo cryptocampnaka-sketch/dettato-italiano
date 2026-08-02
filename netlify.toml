@@ -1,0 +1,7 @@
+[build]
+  functions = "netlify/functions"
+
+[[redirects]]
+  from = "/api/get-speech-token"
+  to = "/.netlify/functions/get-speech-token"
+  status = 200
