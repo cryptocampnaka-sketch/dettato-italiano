@@ -5743,6 +5743,9 @@ function setupModeToggle(){
       buttons.forEach(b=> b.classList.toggle('active', b===btn));
       updateModeNote();
       switchModeView();
+      // já pede o token da Azure em segundo plano ao entrar num modo com microfone,
+      // pra ele estar pronto assim que o usuário tocar em gravar
+      if (state.mode === 'speech' || state.mode === 'interview') prefetchSpeechToken();
     });
   });
   updateModeNote();
@@ -6280,15 +6283,57 @@ function renderQuestion(){
   itInput.focus();
 }
 
+// Cache do token da Azure: o token dura ~10 minutos, então evitamos buscar
+// um novo a cada gravação (isso elimina uma chamada de rede + o cold start
+// da Netlify Function na maioria das tentativas, que era a maior causa da
+// demora de ~10s). Também disparamos a busca em segundo plano assim que o
+// usuário entra no modo Pronúncia/Entrevistador, para o token já estar
+// pronto quando ele tocar no microfone.
+let _speechTokenCache = { token: null, region: null, expiresAt: 0 };
+let _speechTokenFetchPromise = null;
+
+async function getSpeechToken(){
+  const now = Date.now();
+  // margem de segurança de 60s antes do token expirar
+  if (_speechTokenCache.token && now < _speechTokenCache.expiresAt - 60000){
+    return _speechTokenCache;
+  }
+  if (_speechTokenFetchPromise) return _speechTokenFetchPromise;
+
+  _speechTokenFetchPromise = (async () => {
+    const tokenResp = await fetch('/api/get-speech-token');
+    if (!tokenResp.ok) throw new Error('Falha ao obter token de acesso.');
+    const { token, region } = await tokenResp.json();
+    // tokens de Speech da Azure são válidos por 10 minutos
+    _speechTokenCache = { token, region, expiresAt: Date.now() + 10 * 60 * 1000 };
+    return _speechTokenCache;
+  })();
+
+  try{
+    return await _speechTokenFetchPromise;
+  } finally {
+    _speechTokenFetchPromise = null;
+  }
+}
+
+// Dispara a busca do token em segundo plano, sem bloquear a UI.
+// Chame isso assim que o usuário abrir uma tela com microfone.
+function prefetchSpeechToken(){
+  getSpeechToken().catch(()=>{ /* falha silenciosa: tenta de novo na gravação real */ });
+}
+
 // Chama o backend (Netlify Function) para obter um token temporário da Azure,
 // grava o microfone e devolve as notas de avaliação de pronúncia (0-100).
 async function avaliarPronunciaAzure(textoReferencia){
-  const tokenResp = await fetch('/api/get-speech-token');
-  if (!tokenResp.ok) throw new Error('Falha ao obter token de acesso.');
-  const { token, region } = await tokenResp.json();
+  const { token, region } = await getSpeechToken();
 
   const speechConfig = SpeechSDK.SpeechConfig.fromAuthorizationToken(token, region);
   speechConfig.speechRecognitionLanguage = 'it-IT';
+  // Encurta o tempo que a Azure espera por silêncio antes de finalizar o
+  // reconhecimento (padrão costuma ser mais conservador). Ajuste os valores
+  // (em ms) se sentir que está cortando sua fala cedo demais.
+  speechConfig.setProperty(SpeechSDK.PropertyId.SpeechServiceConnection_InitialSilenceTimeoutMs, "3000");
+  speechConfig.setProperty(SpeechSDK.PropertyId.Speech_SegmentationSilenceTimeoutMs, "500");
 
   const audioConfig = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
 
