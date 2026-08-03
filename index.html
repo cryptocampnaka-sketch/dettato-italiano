@@ -5632,6 +5632,15 @@ const PHONETICS = [
 ];
 
 /* ================= ESTADO ================= */
+// Notas mínimas (0-100) para considerar a pronúncia correta.
+// PRECISAO é o AccuracyScore da Azure — mede se os fonemas saíram certos e
+// é a métrica que realmente importa aqui. GERAL é a nota combinada (inclui
+// fluência/completude, que em palavras isoladas costumam bater 100% mesmo
+// com pronúncia ruim, então sozinha ela é uma checagem fraca demais).
+// Exigimos as duas: nota geral alta E precisão de fonemas alta.
+const NOTA_MINIMA_PRECISAO = 90;
+const NOTA_MINIMA_GERAL = 80;
+
 let state = {
   levelStatus: { iniciante:"unlocked", intermedio:"locked", avancado:"locked" }, // locked | unlocked | done
   currentLevel: "iniciante",
@@ -5743,6 +5752,9 @@ function setupModeToggle(){
       buttons.forEach(b=> b.classList.toggle('active', b===btn));
       updateModeNote();
       switchModeView();
+      // já pede o token da Azure em segundo plano ao entrar num modo com microfone,
+      // pra ele estar pronto assim que o usuário tocar em gravar
+      if (state.mode === 'speech' || state.mode === 'interview') prefetchSpeechToken();
     });
   });
   updateModeNote();
@@ -5991,7 +6003,7 @@ async function togglePhoneticsRecording(item){
     }
     if (state.phon.reqId !== myReqId) return; // resultado desatualizado, usuário já mudou de palavra
 
-    const isCorrect = resultado.geral >= 80;
+    const isCorrect = resultado.precisao >= NOTA_MINIMA_PRECISAO && resultado.geral >= NOTA_MINIMA_GERAL;
     const hb = document.getElementById('labHeardBox');
     if (hb){
       hb.classList.remove('good','bad');
@@ -6280,15 +6292,57 @@ function renderQuestion(){
   itInput.focus();
 }
 
+// Cache do token da Azure: o token dura ~10 minutos, então evitamos buscar
+// um novo a cada gravação (isso elimina uma chamada de rede + o cold start
+// da Netlify Function na maioria das tentativas, que era a maior causa da
+// demora de ~10s). Também disparamos a busca em segundo plano assim que o
+// usuário entra no modo Pronúncia/Entrevistador, para o token já estar
+// pronto quando ele tocar no microfone.
+let _speechTokenCache = { token: null, region: null, expiresAt: 0 };
+let _speechTokenFetchPromise = null;
+
+async function getSpeechToken(){
+  const now = Date.now();
+  // margem de segurança de 60s antes do token expirar
+  if (_speechTokenCache.token && now < _speechTokenCache.expiresAt - 60000){
+    return _speechTokenCache;
+  }
+  if (_speechTokenFetchPromise) return _speechTokenFetchPromise;
+
+  _speechTokenFetchPromise = (async () => {
+    const tokenResp = await fetch('/api/get-speech-token');
+    if (!tokenResp.ok) throw new Error('Falha ao obter token de acesso.');
+    const { token, region } = await tokenResp.json();
+    // tokens de Speech da Azure são válidos por 10 minutos
+    _speechTokenCache = { token, region, expiresAt: Date.now() + 10 * 60 * 1000 };
+    return _speechTokenCache;
+  })();
+
+  try{
+    return await _speechTokenFetchPromise;
+  } finally {
+    _speechTokenFetchPromise = null;
+  }
+}
+
+// Dispara a busca do token em segundo plano, sem bloquear a UI.
+// Chame isso assim que o usuário abrir uma tela com microfone.
+function prefetchSpeechToken(){
+  getSpeechToken().catch(()=>{ /* falha silenciosa: tenta de novo na gravação real */ });
+}
+
 // Chama o backend (Netlify Function) para obter um token temporário da Azure,
 // grava o microfone e devolve as notas de avaliação de pronúncia (0-100).
 async function avaliarPronunciaAzure(textoReferencia){
-  const tokenResp = await fetch('/api/get-speech-token');
-  if (!tokenResp.ok) throw new Error('Falha ao obter token de acesso.');
-  const { token, region } = await tokenResp.json();
+  const { token, region } = await getSpeechToken();
 
   const speechConfig = SpeechSDK.SpeechConfig.fromAuthorizationToken(token, region);
   speechConfig.speechRecognitionLanguage = 'it-IT';
+  // Encurta o tempo que a Azure espera por silêncio antes de finalizar o
+  // reconhecimento (padrão costuma ser mais conservador). Ajuste os valores
+  // (em ms) se sentir que está cortando sua fala cedo demais.
+  speechConfig.setProperty(SpeechSDK.PropertyId.SpeechServiceConnection_InitialSilenceTimeoutMs, "3000");
+  speechConfig.setProperty(SpeechSDK.PropertyId.Speech_SegmentationSilenceTimeoutMs, "500");
 
   const audioConfig = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
 
@@ -6346,10 +6400,7 @@ async function startRecording(item){
 
 function evaluateSpeech(item, resultado){
   if (state.answered) return;
-  // Nota geral mínima (0-100) para considerar a pronúncia correta.
-  // Ajuste esse número se quiser exigir mais ou menos rigor.
-  const NOTA_MINIMA = 80;
-  const isCorrect = resultado.geral >= NOTA_MINIMA;
+  const isCorrect = resultado.precisao >= NOTA_MINIMA_PRECISAO && resultado.geral >= NOTA_MINIMA_GERAL;
 
   const box = document.getElementById('transcriptBox');
   box.style.display = 'block';
@@ -6981,9 +7032,7 @@ function diffWords(target, transcript){
 function evaluateInterviewSpeech(q, resultado){
   if (state.interview.answered) return;
 
-  // Nota geral mínima (0-100) para considerar a resposta correta.
-  const NOTA_MINIMA = 80;
-  const isCorrect = resultado.geral >= NOTA_MINIMA;
+  const isCorrect = resultado.precisao >= NOTA_MINIMA_PRECISAO && resultado.geral >= NOTA_MINIMA_GERAL;
   const transcript = resultado.transcript || '';
   const scoreLine = `Precisão: ${resultado.precisao}% · Fluência: ${resultado.fluencia}% · Completude: ${resultado.completude}% · Nota geral: ${resultado.geral}%`;
 
