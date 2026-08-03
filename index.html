@@ -587,7 +587,7 @@
 #view-gramatica .hero-legend span{display:flex; align-items:center; gap:8px;}
 #view-gramatica .dot{width:10px; height:10px; border-radius:50%; display:inline-block;}
 
-#view-gramatica .content{max-width:760px; margin:0 auto; padding:16px 64px 140px;}
+#view-gramatica .content{max-width:960px; margin:0 auto; padding:16px 64px 140px;}
 
 /* ---------- Parte dividers ---------- */
 #view-gramatica .parte-divider{
@@ -954,7 +954,7 @@
 #view-chunks .hero-legend span{display:flex; align-items:center; gap:8px;}
 #view-chunks .hero-legend .dot{width:10px; height:10px; border-radius:50%; display:inline-block;}
 
-#view-chunks .content{max-width:820px; margin:0 auto; padding:16px 64px 140px;}
+#view-chunks .content{max-width:960px; margin:0 auto; padding:16px 64px 140px;}
 
 #view-chunks .k-parte-divider{
   margin:72px 0 26px;
@@ -1157,15 +1157,16 @@
 #view-exercicios main{flex:1; min-width:0;}
 #view-exercicios .hero{
   padding:56px 64px 32px; border-bottom:1px solid var(--x-line); background:var(--x-panel);
+  text-align:center;
 }
 #view-exercicios .hero-eyebrow{
   font-size:12.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--x-plum); margin-bottom:10px; font-weight:600;
 }
 #view-exercicios .hero h1{
-  font-family:'Newsreader',serif; font-size:clamp(26px,3.4vw,36px); line-height:1.15; margin:0 0 14px; color:var(--x-ink);
+  font-family:'Newsreader',serif; font-size:clamp(26px,3.4vw,36px); line-height:1.15; margin:0 auto 14px; color:var(--x-ink); max-width:16ch;
 }
-#view-exercicios .hero p{color:var(--x-ink-soft); font-size:15px; line-height:1.6; max-width:640px; margin:0;}
-#view-exercicios .content{max-width:760px; margin:0 auto; padding:36px 64px 140px;}
+#view-exercicios .hero p{color:var(--x-ink-soft); font-size:15px; line-height:1.6; max-width:58ch; margin:0 auto;}
+#view-exercicios .content{max-width:960px; margin:0 auto; padding:36px 64px 140px;}
 #view-exercicios .x-exo-box{
   background:var(--x-panel); border:1px solid var(--x-line); border-radius:22px;
   padding:28px 30px; box-shadow:0 10px 30px -18px rgba(36,28,61,.35);
@@ -1409,7 +1410,7 @@
 #view-escuta .hero-legend span{display:flex; align-items:center; gap:8px;}
 #view-escuta .dot{width:10px; height:10px; border-radius:50%; display:inline-block;}
 
-#view-escuta .content{max-width:760px; margin:0 auto; padding:16px 64px 140px;}
+#view-escuta .content{max-width:960px; margin:0 auto; padding:16px 64px 140px;}
 
 #view-escuta .parte-divider{
   margin:72px 0 34px;
@@ -5696,9 +5697,36 @@ function speak(text, rate){
   if (state.italianVoice) u.voice = state.italianVoice;
   const btn = document.getElementById('playBtn');
   if (btn) btn.classList.add('speaking');
-  u.onend = () => { if (btn) btn.classList.remove('speaking'); };
-  u.onerror = () => { if (btn) btn.classList.remove('speaking'); };
+
+  // trava os botões de microfone enquanto o áudio de referência toca, para evitar
+  // que o microfone capte essa voz sintética junto com (ou no lugar d)a sua
+  setMicButtonsLockedByTTS(true);
+
+  u.onend = () => { if (btn) btn.classList.remove('speaking'); setMicButtonsLockedByTTS(false); };
+  u.onerror = () => { if (btn) btn.classList.remove('speaking'); setMicButtonsLockedByTTS(false); };
   speechSynthesis.speak(u);
+}
+
+function setMicButtonsLockedByTTS(locked){
+  const configs = [
+    { btnId:'micBtn', hintId:'micHint', hintLocked:'Aguarde o áudio terminar...', hintReady:'Toque no microfone e repita a frase em italiano', answeredFlag: () => state.answered },
+    { btnId:'intMicBtn', hintId:'intMicHint', hintLocked:'Aguarde o áudio terminar...', hintReady:'Toque no microfone e responda em italiano', answeredFlag: () => state.interview && state.interview.answered },
+    { btnId:'recordBtn', hintId:'recordHint', hintLocked:'Aguarde o áudio terminar...', hintReady:'Toque para gravar sua pronúncia', answeredFlag: () => false }
+  ];
+  configs.forEach(cfg => {
+    const btn = document.getElementById(cfg.btnId);
+    const hint = document.getElementById(cfg.hintId);
+    if (!btn) return;
+    if (locked){
+      btn.disabled = true;
+      if (hint) hint.textContent = cfg.hintLocked;
+    } else {
+      if (!cfg.answeredFlag()){
+        btn.disabled = false;
+        if (hint) hint.textContent = cfg.hintReady;
+      }
+    }
+  });
 }
 
 /* ================= RECONHECIMENTO DE VOZ (modo Pronúncia) ================= */
