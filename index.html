@@ -587,7 +587,7 @@
 #view-gramatica .hero-legend span{display:flex; align-items:center; gap:8px;}
 #view-gramatica .dot{width:10px; height:10px; border-radius:50%; display:inline-block;}
 
-#view-gramatica .content{max-width:1040px; margin:0 auto; padding:16px 56px 140px;}
+#view-gramatica .content{max-width:760px; margin:0 auto; padding:16px 64px 140px;}
 
 /* ---------- Parte dividers ---------- */
 #view-gramatica .parte-divider{
@@ -954,7 +954,7 @@
 #view-chunks .hero-legend span{display:flex; align-items:center; gap:8px;}
 #view-chunks .hero-legend .dot{width:10px; height:10px; border-radius:50%; display:inline-block;}
 
-#view-chunks .content{max-width:1100px; margin:0 auto; padding:16px 56px 140px;}
+#view-chunks .content{max-width:820px; margin:0 auto; padding:16px 64px 140px;}
 
 #view-chunks .k-parte-divider{
   margin:72px 0 26px;
@@ -1165,7 +1165,7 @@
   font-family:'Newsreader',serif; font-size:clamp(26px,3.4vw,36px); line-height:1.15; margin:0 0 14px; color:var(--x-ink);
 }
 #view-exercicios .hero p{color:var(--x-ink-soft); font-size:15px; line-height:1.6; max-width:640px; margin:0;}
-#view-exercicios .content{max-width:1040px; margin:0 auto; padding:36px 56px 140px;}
+#view-exercicios .content{max-width:760px; margin:0 auto; padding:36px 64px 140px;}
 #view-exercicios .x-exo-box{
   background:var(--x-panel); border:1px solid var(--x-line); border-radius:22px;
   padding:28px 30px; box-shadow:0 10px 30px -18px rgba(36,28,61,.35);
@@ -1409,7 +1409,7 @@
 #view-escuta .hero-legend span{display:flex; align-items:center; gap:8px;}
 #view-escuta .dot{width:10px; height:10px; border-radius:50%; display:inline-block;}
 
-#view-escuta .content{max-width:1040px; margin:0 auto; padding:16px 56px 140px;}
+#view-escuta .content{max-width:760px; margin:0 auto; padding:16px 64px 140px;}
 
 #view-escuta .parte-divider{
   margin:72px 0 34px;
@@ -5632,15 +5632,6 @@ const PHONETICS = [
 ];
 
 /* ================= ESTADO ================= */
-// Notas mínimas (0-100) para considerar a pronúncia correta.
-// PRECISAO é o AccuracyScore da Azure — mede se os fonemas saíram certos e
-// é a métrica que realmente importa aqui. GERAL é a nota combinada (inclui
-// fluência/completude, que em palavras isoladas costumam bater 100% mesmo
-// com pronúncia ruim, então sozinha ela é uma checagem fraca demais).
-// Exigimos as duas: nota geral alta E precisão de fonemas alta.
-const NOTA_MINIMA_PRECISAO = 90;
-const NOTA_MINIMA_GERAL = 80;
-
 let state = {
   levelStatus: { iniciante:"unlocked", intermedio:"locked", avancado:"locked" }, // locked | unlocked | done
   currentLevel: "iniciante",
@@ -5752,9 +5743,6 @@ function setupModeToggle(){
       buttons.forEach(b=> b.classList.toggle('active', b===btn));
       updateModeNote();
       switchModeView();
-      // já pede o token da Azure em segundo plano ao entrar num modo com microfone,
-      // pra ele estar pronto assim que o usuário tocar em gravar
-      if (state.mode === 'speech' || state.mode === 'interview') prefetchSpeechToken();
     });
   });
   updateModeNote();
@@ -5996,14 +5984,14 @@ async function togglePhoneticsRecording(item){
   }
 
   try{
-    const resultado = await avaliarPronunciaAzure(item.it);
+    const resultado = await avaliarPronunciaAzure(item.it, () => { hint.textContent = 'Analisando pronúncia...'; });
     if (localStream) localStream.getTracks().forEach(t => t.stop());
     if (state.phon.mediaRecorder && state.phon.mediaRecorder.state !== 'inactive'){
       state.phon.mediaRecorder.stop();
     }
     if (state.phon.reqId !== myReqId) return; // resultado desatualizado, usuário já mudou de palavra
 
-    const isCorrect = resultado.precisao >= NOTA_MINIMA_PRECISAO && resultado.geral >= NOTA_MINIMA_GERAL;
+    const isCorrect = resultado.geral >= 80;
     const hb = document.getElementById('labHeardBox');
     if (hb){
       hb.classList.remove('good','bad');
@@ -6021,15 +6009,7 @@ async function togglePhoneticsRecording(item){
         `;
       } else {
         hb.classList.add('bad');
-        hb.innerHTML = resultado.palavraDiferente ? `
-          <div class="fb-title">✗ Não reconheci essa palavra</div>
-          <div class="fb-answers">
-            Texto esperado: <b>${item.it}</b><br>
-            Você falou: <b>${resultado.transcript || '(nada reconhecido)'}</b><br>
-            Tradução: ${item.pt}<br>
-            O que você falou parece bem diferente da palavra esperada. Tente de novo.
-          </div>
-        ` : `
+        hb.innerHTML = `
           <div class="fb-title">✗ A pronúncia não bateu</div>
           <div class="fb-answers">
             Texto esperado: <b>${item.it}</b><br>
@@ -6300,148 +6280,71 @@ function renderQuestion(){
   itInput.focus();
 }
 
-// Cache do token da Azure: o token dura ~10 minutos, então evitamos buscar
-// um novo a cada gravação (isso elimina uma chamada de rede + o cold start
-// da Netlify Function na maioria das tentativas, que era a maior causa da
-// demora de ~10s). Também disparamos a busca em segundo plano assim que o
-// usuário entra no modo Pronúncia/Entrevistador, para o token já estar
-// pronto quando ele tocar no microfone.
-let _speechTokenCache = { token: null, region: null, expiresAt: 0 };
-let _speechTokenFetchPromise = null;
-
-async function getSpeechToken(){
-  const now = Date.now();
-  // margem de segurança de 60s antes do token expirar
-  if (_speechTokenCache.token && now < _speechTokenCache.expiresAt - 60000){
-    return _speechTokenCache;
-  }
-  if (_speechTokenFetchPromise) return _speechTokenFetchPromise;
-
-  _speechTokenFetchPromise = (async () => {
-    const tokenResp = await fetch('/api/get-speech-token');
-    if (!tokenResp.ok) throw new Error('Falha ao obter token de acesso.');
-    const { token, region } = await tokenResp.json();
-    // tokens de Speech da Azure são válidos por 10 minutos
-    _speechTokenCache = { token, region, expiresAt: Date.now() + 10 * 60 * 1000 };
-    return _speechTokenCache;
-  })();
-
-  try{
-    return await _speechTokenFetchPromise;
-  } finally {
-    _speechTokenFetchPromise = null;
-  }
-}
-
-// Dispara a busca do token em segundo plano, sem bloquear a UI.
-// Chame isso assim que o usuário abrir uma tela com microfone.
-function prefetchSpeechToken(){
-  getSpeechToken().catch(()=>{ /* falha silenciosa: tenta de novo na gravação real */ });
-}
-
-// Quão parecido (0-1) o texto reconhecido "livre" precisa ser do texto de
-// referência pra confiarmos na nota de pronúncia. Abaixo disso, tratamos
-// como "palavra errada" mesmo que a avaliação da Azure dê nota alta —
-// porque a avaliação guiada por referência pode "colapsar" pro texto
-// esperado mesmo quando você fala outra coisa (limitação documentada da
-// Azure, não bug deste app). Ajuste se achar rígido/frouxo demais.
-const SIMILARIDADE_MINIMA_TRANSCRICAO = 0.45;
-
 // Chama o backend (Netlify Function) para obter um token temporário da Azure,
-// grava o microfone UMA vez e roda dois reconhecimentos em paralelo sobre o
-// mesmo áudio: (1) um reconhecimento livre, sem viés da palavra esperada,
-// usado só pra conferir o que você realmente disse; e (2) a avaliação de
-// pronúncia guiada pela referência, que dá as notas de precisão/fluência/
-// completude. Se o reconhecimento livre não bater com a referência, a nota
-// de pronúncia é descartada e tratamos como resposta errada.
-async function avaliarPronunciaAzure(textoReferencia){
-  const { token, region } = await getSpeechToken();
+// grava o microfone e devolve as notas de avaliação de pronúncia (0-100).
+// Guarda o token em memória e só busca um novo quando estiver perto de expirar
+// (o token da Azure dura ~10 minutos) — evita uma viagem de rede extra a cada gravação.
+let _azureTokenCache = { token: null, region: null, expiresAt: 0 };
 
-  const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  const assessTrack = micStream.getAudioTracks()[0].clone();
-  const assessStream = new MediaStream([assessTrack]);
-  const stopAllTracks = () => {
-    micStream.getTracks().forEach(t => t.stop());
-    assessStream.getTracks().forEach(t => t.stop());
-  };
+async function getAzureSpeechToken(){
+  const agora = Date.now();
+  if (_azureTokenCache.token && agora < _azureTokenCache.expiresAt){
+    return _azureTokenCache;
+  }
+  const tokenResp = await fetch('/api/get-speech-token');
+  if (!tokenResp.ok) throw new Error('Falha ao obter token de acesso.');
+  const { token, region } = await tokenResp.json();
+  // renova 1 minuto antes de expirar, por segurança
+  _azureTokenCache = { token, region, expiresAt: agora + 9 * 60 * 1000 };
+  return _azureTokenCache;
+}
 
-  const makeSpeechConfig = () => {
-    const cfg = SpeechSDK.SpeechConfig.fromAuthorizationToken(token, region);
-    cfg.speechRecognitionLanguage = 'it-IT';
-    // Encurta o tempo de espera pra você COMEÇAR a falar.
-    cfg.setProperty(SpeechSDK.PropertyId.SpeechServiceConnection_InitialSilenceTimeoutMs, "3000");
-    // Encurta o silêncio no FIM da fala: por padrão o SDK espera ~2-3s de
-    // silêncio depois que você para de falar antes de fechar o resultado.
-    // Como aqui é sempre uma frase única e curta (não ditado contínuo),
-    // 700ms é suficiente pra Azure perceber que você terminou sem cortar
-    // a última palavra. Se notar respostas cortadas no fim, suba esse valor.
-    cfg.setProperty(SpeechSDK.PropertyId.SpeechServiceConnection_EndSilenceTimeoutMs, "700");
-    return cfg;
-  };
+async function avaliarPronunciaAzure(textoReferencia, onSpeechEnd){
+  const { token, region } = await getAzureSpeechToken();
 
-  const recognizerPlain = new SpeechSDK.SpeechRecognizer(makeSpeechConfig(), SpeechSDK.AudioConfig.fromStreamInput(micStream));
+  const speechConfig = SpeechSDK.SpeechConfig.fromAuthorizationToken(token, region);
+  speechConfig.speechRecognitionLanguage = 'it-IT';
+  // reduz o tempo de silêncio exigido para finalizar o reconhecimento —
+  // frases curtas não precisam esperar tanto para serem consideradas "terminadas"
+  speechConfig.setProperty(SpeechSDK.PropertyId.SpeechServiceConnection_EndSilenceTimeoutMs, "300");
+  speechConfig.setProperty(SpeechSDK.PropertyId.Speech_SegmentationSilenceTimeoutMs, "300");
 
-  const recognizerAssess = new SpeechSDK.SpeechRecognizer(makeSpeechConfig(), SpeechSDK.AudioConfig.fromStreamInput(assessStream));
+  const audioConfig = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
+
   const pronunciationConfig = new SpeechSDK.PronunciationAssessmentConfig(
     textoReferencia,
     SpeechSDK.PronunciationAssessmentGradingSystem.HundredMark,
     SpeechSDK.PronunciationAssessmentGranularity.Phoneme,
     true
   );
-  pronunciationConfig.applyTo(recognizerAssess);
 
-  const recognizeOnce = (recognizer) => new Promise((resolve, reject) => {
+  const recognizer = new SpeechSDK.SpeechRecognizer(speechConfig, audioConfig);
+  pronunciationConfig.applyTo(recognizer);
+
+  if (typeof onSpeechEnd === 'function'){
+    recognizer.speechEndDetected = () => onSpeechEnd();
+  }
+
+  return new Promise((resolve, reject) => {
     recognizer.recognizeOnceAsync(
-      (result) => { recognizer.close(); resolve(result); },
+      (result) => {
+        recognizer.close();
+        if (result.reason === SpeechSDK.ResultReason.RecognizedSpeech){
+          const pron = SpeechSDK.PronunciationAssessmentResult.fromResult(result);
+          resolve({
+            transcript: result.text,
+            precisao: Math.round(pron.accuracyScore),
+            fluencia: Math.round(pron.fluencyScore),
+            completude: Math.round(pron.completenessScore),
+            geral: Math.round(pron.pronunciationScore)
+          });
+        } else {
+          reject(new Error('Não entendi. Fale mais perto do microfone.'));
+        }
+      },
       (err) => { recognizer.close(); reject(err); }
     );
   });
-
-  let plainResult, assessResult;
-  try{
-    [plainResult, assessResult] = await Promise.all([
-      recognizeOnce(recognizerPlain).catch(() => null), // reconhecimento livre é best-effort
-      recognizeOnce(recognizerAssess)
-    ]);
-  } finally {
-    stopAllTracks();
-  }
-
-  if (!assessResult || assessResult.reason !== SpeechSDK.ResultReason.RecognizedSpeech){
-    throw new Error('Não entendi. Fale mais perto do microfone.');
-  }
-
-  const transcricaoLivre = (plainResult && plainResult.reason === SpeechSDK.ResultReason.RecognizedSpeech)
-    ? plainResult.text
-    : '';
-  const transcriptFinal = transcricaoLivre || assessResult.text;
-
-  const pron = SpeechSDK.PronunciationAssessmentResult.fromResult(assessResult);
-
-  // Só confiamos na nota se tivermos uma transcrição livre pra comparar E ela
-  // bater com a referência. Sem transcrição livre (falha silenciosa acima),
-  // caímos de volta pra nota da Azure normalmente.
-  if (transcricaoLivre){
-    const bateu = similarity(normalize(transcricaoLivre), normalize(textoReferencia)) >= SIMILARIDADE_MINIMA_TRANSCRICAO;
-    if (!bateu){
-      return {
-        transcript: transcriptFinal,
-        precisao: 0,
-        fluencia: 0,
-        completude: 0,
-        geral: 0,
-        palavraDiferente: true
-      };
-    }
-  }
-
-  return {
-    transcript: transcriptFinal,
-    precisao: Math.round(pron.accuracyScore),
-    fluencia: Math.round(pron.fluencyScore),
-    completude: Math.round(pron.completenessScore),
-    geral: Math.round(pron.pronunciationScore)
-  };
 }
 
 async function startRecording(item){
@@ -6454,7 +6357,7 @@ async function startRecording(item){
   hint.textContent = 'Ouvindo... fale agora';
 
   try{
-    const resultado = await avaliarPronunciaAzure(item.it);
+    const resultado = await avaliarPronunciaAzure(item.it, () => { hint.textContent = 'Analisando pronúncia...'; });
     evaluateSpeech(item, resultado);
   } catch(err){
     hint.textContent = 'Não foi possível avaliar. Verifique o microfone e toque novamente.';
@@ -6466,7 +6369,10 @@ async function startRecording(item){
 
 function evaluateSpeech(item, resultado){
   if (state.answered) return;
-  const isCorrect = resultado.precisao >= NOTA_MINIMA_PRECISAO && resultado.geral >= NOTA_MINIMA_GERAL;
+  // Nota geral mínima (0-100) para considerar a pronúncia correta.
+  // Ajuste esse número se quiser exigir mais ou menos rigor.
+  const NOTA_MINIMA = 80;
+  const isCorrect = resultado.geral >= NOTA_MINIMA;
 
   const box = document.getElementById('transcriptBox');
   box.style.display = 'block';
@@ -6543,15 +6449,7 @@ function finishAnswer(item, isCorrect, detail, wasRevealed){
     postcard.classList.add('state-bad');
     fb.classList.add('bad');
     if (isSpeech && !wasRevealed){
-      fb.innerHTML = detail.palavraDiferente ? `
-        <div class="fb-title">✗ Não reconheci essa palavra</div>
-        <div class="fb-answers">
-          Texto esperado: <b>${item.it}</b><br>
-          Você falou: <b>${detail.transcript || '(nada reconhecido)'}</b><br>
-          Tradução: ${item.pt[0]}<br>
-          O que você falou parece bem diferente da frase esperada. Tente de novo.
-        </div>
-      ` : `
+      fb.innerHTML = `
         <div class="fb-title">✗ A pronúncia não bateu</div>
         <div class="fb-answers">
           Texto esperado: <b>${item.it}</b><br>
@@ -7061,7 +6959,7 @@ async function startInterviewRecording(q){
   }
 
   try{
-    const resultado = await avaliarPronunciaAzure(q.target);
+    const resultado = await avaliarPronunciaAzure(q.target, () => { hint.textContent = 'Analisando pronúncia...'; });
     if (localMediaRecorder && localMediaRecorder.state !== 'inactive'){
       localMediaRecorder.stop();
     }
@@ -7106,7 +7004,9 @@ function diffWords(target, transcript){
 function evaluateInterviewSpeech(q, resultado){
   if (state.interview.answered) return;
 
-  const isCorrect = resultado.precisao >= NOTA_MINIMA_PRECISAO && resultado.geral >= NOTA_MINIMA_GERAL;
+  // Nota geral mínima (0-100) para considerar a resposta correta.
+  const NOTA_MINIMA = 80;
+  const isCorrect = resultado.geral >= NOTA_MINIMA;
   const transcript = resultado.transcript || '';
   const scoreLine = `Precisão: ${resultado.precisao}% · Fluência: ${resultado.fluencia}% · Completude: ${resultado.completude}% · Nota geral: ${resultado.geral}%`;
 
@@ -7143,10 +7043,7 @@ function evaluateInterviewSpeech(q, resultado){
     document.getElementById('intMicBtn').disabled = false;
 
     fb.classList.add('bad');
-    fb.innerHTML = resultado.palavraDiferente ? `
-      <div class="fb-title">✗ Não reconheci essa resposta</div>
-      <div class="fb-answers">O que você falou parece bem diferente do esperado.<br>Frase correta: ${q.target}</div>
-    ` : `
+    fb.innerHTML = `
       <div class="fb-title">✗ A pronúncia não bateu</div>
       <div class="fb-answers">${scoreLine}<br>Frase correta: ${q.target}</div>
     `;
