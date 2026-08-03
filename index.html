@@ -156,6 +156,11 @@
     box-shadow:inset 0 -2px 0 rgba(36,28,61,0.15);
   }
   .mode-btn:active{transform:translateY(1px);}
+  .mode-btn.locked{
+    cursor:not-allowed;opacity:.55;background:var(--card);color:var(--ink-soft);
+    border-style:dashed;
+  }
+  .mode-btn.locked:active{transform:none;}
   .mode-note{
     text-align:center;font-family:'Space Mono',monospace;font-size:11px;color:var(--ink-soft);opacity:.8;
     margin:-10px 0 18px;
@@ -1837,8 +1842,8 @@
 
   <div class="mode-toggle" id="modeToggle">
     <button class="mode-btn active" data-mode="text">📝 Ditado (escrever)</button>
-    <button class="mode-btn" data-mode="speech">🎙️ Pronúncia (falar)</button>
-    <button class="mode-btn" data-mode="interview">🎤 Entrevistador</button>
+    <button class="mode-btn locked" data-mode="speech" disabled>🔒 Pronúncia (falar)</button>
+    <button class="mode-btn locked" data-mode="interview" disabled>🔒 Entrevistador</button>
   </div>
   <p class="mode-note" id="modeNote"></p>
 
@@ -5765,10 +5770,15 @@ function setupModeToggle(){
   const buttons = document.querySelectorAll('.mode-btn');
   buttons.forEach(btn=>{
     btn.addEventListener('click', ()=>{
+      if (btn.classList.contains('locked')){
+        const note = document.getElementById('modeNote');
+        if (note) note.textContent = '🔒 Este modo está desativado (reconhecimento de voz indisponível neste navegador).';
+        return;
+      }
       if (btn.dataset.mode === state.mode) return;
       if (state.mode === 'speech') stopPhoneticsRecording(true);
       state.mode = btn.dataset.mode;
-      buttons.forEach(b=> b.classList.toggle('active', b===btn));
+      buttons.forEach(b=> { if (!b.classList.contains('locked')) b.classList.toggle('active', b===btn); });
       updateModeNote();
       switchModeView();
     });
